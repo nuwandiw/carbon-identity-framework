@@ -28,7 +28,6 @@ import org.wso2.carbon.identity.application.authentication.framework.util.Framew
 import org.wso2.carbon.identity.application.common.IdentityApplicationManagementException;
 import org.wso2.carbon.identity.base.IdentityRuntimeException;
 import org.wso2.carbon.identity.core.model.IdentityCacheConfig;
-import org.wso2.carbon.identity.core.model.IdentityCacheConfigKey;
 import org.wso2.carbon.identity.core.util.IdentityDatabaseUtil;
 import org.wso2.carbon.identity.core.util.IdentityTenantUtil;
 import org.wso2.carbon.identity.core.util.IdentityUtil;
@@ -47,9 +46,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -70,21 +66,23 @@ public class SessionDataStore {
     private static final String OPERATION_DELETE = "DELETE";
     private static final String OPERATION_STORE = "STORE";
     private static final String SQL_INSERT_STORE_OPERATION =
-            "INSERT INTO IDN_AUTH_SESSION_STORE(SESSION_ID, SESSION_TYPE, OPERATION, SESSION_OBJECT, TIME_CREATED, TENANT_ID) VALUES (?,?,?,?,?,?)";
+            "INSERT INTO IDN_AUTH_SESSION_STORE(SESSION_ID, SESSION_TYPE, OPERATION, SESSION_OBJECT, TIME_CREATED, TIME_OUT, TENANT_ID) VALUES (?,?,?,?,?,?,?)";
     private static final String SQL_INSERT_DELETE_OPERATION =
-            "INSERT INTO IDN_AUTH_SESSION_STORE(SESSION_ID, SESSION_TYPE,OPERATION, TIME_CREATED) VALUES (?,?,?,?)";
+            "INSERT INTO IDN_AUTH_SESSION_STORE(SESSION_ID, SESSION_TYPE,OPERATION, TIME_CREATED, TIME_OUT) VALUES (?,?,?,?,?)";
     private static final String SQL_DELETE_STORE_OPERATIONS_TASK =
             "DELETE FROM IDN_AUTH_SESSION_STORE WHERE OPERATION = '"+OPERATION_STORE+"' AND SESSION_ID in (" +
-            "SELECT SESSION_ID  FROM IDN_AUTH_SESSION_STORE WHERE OPERATION = '"+OPERATION_DELETE+"' AND TIME_CREATED < ?)";
+            "SELECT SESSION_ID  FROM IDN_AUTH_SESSION_STORE WHERE OPERATION = '"+OPERATION_DELETE+"' AND TIME_OUT < ?)";
     private static final String SQL_DELETE_STORE_OPERATIONS_TASK_MYSQL =
             "DELETE IDN_AUTH_SESSION_STORE_DELETE FROM IDN_AUTH_SESSION_STORE IDN_AUTH_SESSION_STORE_DELETE WHERE " +
                     "OPERATION = '"+OPERATION_STORE+"' AND SESSION_ID IN (SELECT SESSION_ID FROM (SELECT SESSION_ID " +
-                    "FROM IDN_AUTH_SESSION_STORE WHERE OPERATION = '"+OPERATION_DELETE+"' AND TIME_CREATED < ?) " +
+                    "FROM IDN_AUTH_SESSION_STORE WHERE OPERATION = '"+OPERATION_DELETE+"' AND TIME_OUT < ?) " +
                     "IDN_AUTH_SESSION_STORE_SELECT)";
     private static final String SQL_DELETE_DELETE_OPERATIONS_TASK =
-            "DELETE FROM IDN_AUTH_SESSION_STORE WHERE OPERATION = '"+OPERATION_DELETE+"' AND  TIME_CREATED < ?";
+            "DELETE FROM IDN_AUTH_SESSION_STORE WHERE OPERATION = '"+OPERATION_DELETE+"' AND  TIME_OUT < ?";
     private static final String SQL_DELETE_TEMP_RECORDS =
             "DELETE FROM IDN_AUTH_SESSION_STORE_TEMP WHERE SESSION_ID = ? AND  SESSION_TYPE = ?";
+    private static final String SQL_DELETE_EXPIRED_TEMP_RECORDS =
+            "DELETE FROM IDN_AUTH_SESSION_STORE_TEMP WHERE TIME_OUT < ?";
 
     private static final String SQL_DESERIALIZE_OBJECT_MYSQL =
             "SELECT OPERATION, SESSION_OBJECT, TIME_CREATED FROM IDN_AUTH_SESSION_STORE WHERE SESSION_ID =? AND" +
@@ -129,7 +127,7 @@ public class SessionDataStore {
     private static final String INFORMIX_DATABASE = "Informix";
 
     private static final int DEFAULT_DELETE_LIMIT = 50000;
-    public static final String DEFAULT_SESSION_STORE_TABLE_NAME = "IDN_AUTH_SESSION_STORE";
+    public static final String SESSION_STORE_TABLE_NAME = "IDN_AUTH_SESSION_STORE";
     public static final String TEMP_SUFFIX = "_TEMP";
     private static final String CACHE_MANAGER_NAME = "IdentityApplicationManagementCacheManager";
     private static int maxSessionDataPoolSize = 20;
@@ -151,7 +149,6 @@ public class SessionDataStore {
     static {
         try {
             String maxPoolSizeValue = IdentityUtil.getProperty("JDBCPersistenceManager.SessionDataPersist.PoolSize");
-            String maxTempDataPoolSizeValue = IdentityUtil.getProperty("JDBCPersistenceManager.SessionDataPersist.TempDataPoolSize");
             String maxTempDataDeletePoolSizeValue = IdentityUtil.getProperty("JDBCPersistenceManager.SessionDataPersist.TempDataDeletePoolSize");
             if (StringUtils.isNotBlank(maxPoolSizeValue)) {
                 maxSessionDataPoolSize = Integer.parseInt(maxPoolSizeValue);
@@ -314,7 +311,7 @@ public class SessionDataStore {
                     sqlSelect = SQL_DESERIALIZE_OBJECT_ORACLE;
                 }
             }
-            preparedStatement = connection.prepareStatement(getSessionStoreDBQuery(sqlSelect, type));
+            preparedStatement = connection.prepareStatement(getSessionStoreDBQuery(type, sqlSelect));
             preparedStatement.setString(1, key);
             preparedStatement.setString(2, type);
             resultSet = preparedStatement.executeQuery();
@@ -402,7 +399,7 @@ public class SessionDataStore {
     /**
      * Removes all records related to expired sessions from DB
      */
-    private void removeExpiredRememberMeSessions() {
+    private void removeExpiredRememberMeSessions(boolean isTempData) {
 
         if (StringUtils.isBlank(sqlDeleteExpiredDataTask)) {
             try {
@@ -412,6 +409,10 @@ public class SessionDataStore {
             }
         }
 
+        if (isTempData) {
+            sqlDeleteExpiredDataTask = sqlDeleteExpiredDataTask.replace(
+                    SESSION_STORE_TABLE_NAME, SESSION_STORE_TABLE_NAME + TEMP_SUFFIX);
+        }
         try {
             Tenant[] tenants =
                     FrameworkServiceDataHolder.getInstance().getRealmService().getTenantManager().getAllTenants();
@@ -491,10 +492,13 @@ public class SessionDataStore {
     public void removeExpiredSessionData() {
 
         if (sessionDataCleanupEnabled) {
-            removeExpiredRememberMeSessions();
+            //Deleting expired data from temp and operational tables
+            removeExpiredRememberMeSessions(true);
+            removeExpiredRememberMeSessions(false);
         }
         if (operationDataCleanupEnabled) {
             deleteSTOREOperationsTask();
+            deleteTempSTOREOperationsTask();
             deleteDELETEOperationsTask();
         }
     }
@@ -519,15 +523,18 @@ public class SessionDataStore {
             log.error(e.getMessage(), e);
             return;
         }
+
+        long cacheTimeoutNano = getCacheTimeout(type, nanoTime);
         PreparedStatement preparedStatement = null;
         try {
-            preparedStatement = connection.prepareStatement(getSessionStoreDBQuery(sqlInsertSTORE, type));
+            preparedStatement = connection.prepareStatement(getSessionStoreDBQuery(type, sqlInsertSTORE));
             preparedStatement.setString(1, key);
             preparedStatement.setString(2, type);
             preparedStatement.setString(3, OPERATION_STORE);
             setBlobObject(preparedStatement, entry, 4);
             preparedStatement.setLong(5, nanoTime);
-            preparedStatement.setInt(6, tenantId);
+            preparedStatement.setLong(6, cacheTimeoutNano);
+            preparedStatement.setInt(7, tenantId);
             preparedStatement.executeUpdate();
             if (!connection.getAutoCommit()) {
                 connection.commit();
@@ -556,13 +563,15 @@ public class SessionDataStore {
             log.error(e.getMessage(), e);
             return;
         }
+        long cacheTimeoutNano = getCacheTimeout(type, nanoTime);
         PreparedStatement preparedStatement = null;
         try {
-            preparedStatement = connection.prepareStatement(getSessionStoreDBQuery(sqlInsertDELETE, type));
+            preparedStatement = connection.prepareStatement(getSessionStoreDBQuery(type, sqlInsertDELETE));
             preparedStatement.setString(1, key);
             preparedStatement.setString(2, type);
             preparedStatement.setString(3, OPERATION_DELETE);
             preparedStatement.setLong(4, nanoTime);
+            preparedStatement.setLong(5, cacheTimeoutNano);
             preparedStatement.executeUpdate();
             if (!connection.getAutoCommit()) {
                 connection.commit();
@@ -650,8 +659,7 @@ public class SessionDataStore {
             log.error(e.getMessage(), e);
             return;
         }
-        long cleanupLimitNano = FrameworkUtils.getCurrentStandardNano() -
-                TimeUnit.MINUTES.toNanos(IdentityUtil.getOperationCleanUpTimeout());
+
         try {
             if (StringUtils.isBlank(sqlDeleteSTORETask)) {
                 if (connection.getMetaData().getDriverName().contains(MYSQL_DATABASE)) {
@@ -661,14 +669,46 @@ public class SessionDataStore {
                 }
             }
             statement = connection.prepareStatement(sqlDeleteSTORETask);
-            statement.setLong(1, cleanupLimitNano);
+            //If timeout contains a value less than current time, the record is considered to be expired
+            statement.setLong(1, FrameworkUtils.getCurrentStandardNano());
             statement.execute();
             if (!connection.getAutoCommit()) {
                 connection.commit();
             }
             return;
         } catch (SQLException e) {
-            log.error("Error while removing STORE operation data from the database for nano time " + cleanupLimitNano, e);
+            log.error("Error while removing STORE operation data from the database for nano time " +
+                    FrameworkUtils.getCurrentStandardNano(), e);
+        } finally {
+            IdentityDatabaseUtil.closeAllConnections(connection, null, statement);
+
+        }
+
+    }
+
+    private void deleteTempSTOREOperationsTask() {
+
+        Connection connection;
+        PreparedStatement statement = null;
+        try {
+            connection = IdentityDatabaseUtil.getDBConnection();
+        } catch (IdentityRuntimeException e) {
+            log.error(e.getMessage(), e);
+            return;
+        }
+
+        try {
+            statement = connection.prepareStatement(SQL_DELETE_EXPIRED_TEMP_RECORDS);
+            //If timeout contains a value less than current time, the record is considered to be expired
+            statement.setLong(1, FrameworkUtils.getCurrentStandardNano());
+            statement.execute();
+            if (!connection.getAutoCommit()) {
+                connection.commit();
+            }
+            return;
+        } catch (SQLException e) {
+            log.error("Error while removing STORE temporary data from the database for nano time " +
+                    FrameworkUtils.getCurrentStandardNano(), e);
         } finally {
             IdentityDatabaseUtil.closeAllConnections(connection, null, statement);
 
@@ -685,18 +725,18 @@ public class SessionDataStore {
             log.error(e.getMessage(), e);
             return;
         }
-        long cleanupLimitNano = FrameworkUtils.getCurrentStandardNano() -
-                TimeUnit.MINUTES.toNanos(IdentityUtil.getOperationCleanUpTimeout());
+
         try {
             statement = connection.prepareStatement(sqlDeleteDELETETask);
-            statement.setLong(1, cleanupLimitNano);
+            statement.setLong(1, FrameworkUtils.getCurrentStandardNano());
             statement.execute();
             if (!connection.getAutoCommit()) {
                 connection.commit();
             }
             return;
         } catch (SQLException e) {
-            log.error("Error while removing DELETE operation data from the database for nano time " + cleanupLimitNano, e);
+            log.error("Error while removing DELETE operation data from the database for nano time " +
+                    FrameworkUtils.getCurrentStandardNano(), e);
         } finally {
             IdentityDatabaseUtil.closeAllConnections(connection, null, statement);
 
@@ -714,15 +754,24 @@ public class SessionDataStore {
         return true;
     }
 
-    private String getSessionStoreDBQuery(String query, String type) throws SQLException {
+    private String getSessionStoreDBQuery(String type, String query) throws SQLException {
 
         // Session table name is assumed to be IDN_AUTH_SESSION_STORE in all configurations.
         // the possibility to configure sql queries in identity.xml would be deprecated in future.
-        String sessionTableName = DEFAULT_SESSION_STORE_TABLE_NAME;
+        String sessionTableName = SESSION_STORE_TABLE_NAME;
         if (!isOperationalData(type)) {
             query = query.replace(sessionTableName, sessionTableName + TEMP_SUFFIX);
         }
         return query;
+    }
+
+    private long getCacheTimeout(String type, long nanoTime) {
+
+        if (isOperationalData(type)) {
+            return FrameworkUtils.getOperationalDataTimeoutNano(nanoTime);
+        } else {
+            return FrameworkUtils.getTempDataTimeoutNano(nanoTime);
+        }
     }
 
 }

@@ -243,6 +243,7 @@ public class IdentityConstants {
 
         public static final String CLEAN_UP_PERIOD = "JDBCPersistenceManager.SessionDataPersist.SessionDataCleanUp.CleanUpPeriod";
         public static final String CLEAN_UP_TIMEOUT = "JDBCPersistenceManager.SessionDataPersist.SessionDataCleanUp.CleanUpTimeout";
+        public static final String TEMP_DATA_CLEAN_UP_TIMEOUT = "JDBCPersistenceManager.SessionDataPersist.SessionDataCleanUp.TemporaryCleanUpTimeout";
 
         public static final String OPERATION_CLEAN_UP_PERIOD = "JDBCPersistenceManager.SessionDataPersist" +
                                                          ".OperationDataCleanUp.CleanUpPeriod";
@@ -250,6 +251,7 @@ public class IdentityConstants {
                                                                 ".OperationDataCleanUp.CleanUpTimeout";
 
         public static final String CLEAN_UP_TIMEOUT_DEFAULT = "20160";
+        public static final String TEMP_DATA_CLEAN_UP_TIMEOUT_DEFAULT = "1440";
         public static final String CLEAN_UP_PERIOD_DEFAULT = "1140";
 
         public static final String OPERATION_CLEAN_UP_TIMEOUT_DEFAULT = "1";

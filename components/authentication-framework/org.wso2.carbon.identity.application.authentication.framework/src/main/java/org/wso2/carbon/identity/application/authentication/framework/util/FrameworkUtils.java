@@ -1218,6 +1218,24 @@ public class FrameworkUtils {
         return currentStandardNano;
     }
 
+    public static long getOperationalDataTimeoutNano(Long nanoTime) {
+
+        if (nanoTime != null) {
+            return nanoTime + TimeUnit.MINUTES.toNanos(IdentityUtil.getCleanUpTimeout());
+        } else {
+            return getCurrentStandardNano() + TimeUnit.MINUTES.toNanos(IdentityUtil.getCleanUpTimeout());
+        }
+    }
+
+    public static long getTempDataTimeoutNano(Long nanoTime) {
+
+        if (nanoTime != null) {
+            return nanoTime + TimeUnit.MINUTES.toNanos(IdentityUtil.getCleanUpTimeout());
+        } else {
+            return getCurrentStandardNano() + TimeUnit.MINUTES.toNanos(IdentityUtil.getTempDataCleanUpTimeout());
+        }
+    }
+
     /**
      * Append a query param to the URL (URL may already contain query params)
      */
